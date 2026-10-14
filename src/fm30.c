@@ -1,7 +1,7 @@
 /*
  * FM30 control: bit-banged bus to U3 (BH1415F), U6/U7 (MCP4921), U2 (MCP42010),
  * Vtune lock detection and the power-up / retune sequence reverse-engineered
- * from the stock MC68HC908JL3 firmware.
+ * from the stock U1 firmware.
  */
 #include "config.h"
 #include "fm30.h"

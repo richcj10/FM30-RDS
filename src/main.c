@@ -1,6 +1,6 @@
 /*
  * FM30 headless controller + RDS encoder
- * NUCLEO-G431KB replacing the MC68HC908JL3 (U1) in a Ramsey FM30.
+ * NUCLEO-G431KB in the U1 socket of a Ramsey FM30.
  */
 #include "config.h"
 #include "fm30.h"

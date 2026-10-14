@@ -10,7 +10,7 @@
 #define FW_VERSION "fm30ctl 0.3"
 
 /* ------------------------------------------------------------------ */
-/* FM30 control bus -> empty U1 (JL3) socket.  (Richard's IO map)      */
+/* FM30 control bus -> U1 socket.  (Richard's IO map)                  */
 /* Bit-banged (no SPI peripheral). All 7 bus lines are OPEN-DRAIN with */
 /* 4.7k pull-ups to FM30 +5 V (U1-7) - one 8-pin bussed SIP network.   */
 /* All bus pins below are 5 V tolerant (FT).                           */

@@ -1,6 +1,6 @@
 # FM30 headless controller + RDS encoder (NUCLEO-G431KB)
 
-This firmware replaces the MC68HC908JL3 (U1) in a Ramsey FM30. The STM32 drives the FM30 control bus directly and also generates pilot-locked RDS. It also drives the front-panel 2×8 LCD for status and messages. The front-panel buttons and the buzzer are not used. An ESP8266 controls everything over serial (USART2, 115200 8N1). For bench work, the same commands work from a PC over the Nucleo's ST-Link USB serial port.
+This firmware runs on a NUCLEO-G431KB wired into the U1 socket of a Ramsey FM30, in place of the stock U1 controller. The STM32 drives the FM30 control bus directly and also generates pilot-locked RDS. It also drives the front-panel 2×8 LCD for status and messages. The front-panel buttons and the buzzer are not used. An ESP8266 controls everything over serial (USART2, 115200 8N1). For bench work, the same commands work from a PC over the Nucleo's ST-Link USB serial port.
 
 ## Build / flash (PlatformIO)
 
@@ -15,7 +15,7 @@ Before you build, check two things on the Nucleo:
 
 ## Wiring (U1 socket → Nucleo)
 
-Remove the JL3 from its socket. Wire from the socket pins:
+Wire the Nucleo to the U1 socket pins:
 
 | Nucleo | STM32 | → U1 pin | Signal | Notes |
 |---|---|---|---|---|
