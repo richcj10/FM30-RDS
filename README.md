@@ -1,6 +1,6 @@
 # FM30 headless controller + RDS encoder (NUCLEO-G431KB)
 
-This firmware replaces the MC68HC908JL3 (U1) in a Ramsey FM30. The STM32 drives the FM30 control bus directly and also generates pilot-locked RDS. The front-panel LCD and buttons are not used. You control everything from the Pi over the Nucleo's USB serial port.
+This firmware replaces the MC68HC908JL3 (U1) in a Ramsey FM30. The STM32 drives the FM30 control bus directly and also generates pilot-locked RDS. It also drives the front-panel 2×8 LCD for status and messages. The front-panel buttons and the buzzer are not used. An ESP8266 controls everything over serial (USART2, 115200 8N1). For bench work, the same commands work from a PC over the Nucleo's ST-Link USB serial port.
 
 ## Build / flash (PlatformIO)
 
@@ -31,18 +31,25 @@ Remove the JL3 from its socket. Wire from the socket pins:
 | A0 | PA0 | — | Pilot / composite in | from RDS front end |
 | A1 | PA1 | 20 | Vtune/2 node | add **47k PA1 → GND** (Vadc = Vtune/3) |
 | A3 | PA4 | — | RDS DAC out | to RDS front end |
+| D13 | PB3 | 15 | LCD D4 (LCD pin 11) | push-pull 3.3 V |
+| D3 | PB0 | 12 | LCD D5 (LCD pin 12) | push-pull 3.3 V |
+| D5 | PA15 | 11 | LCD D6 (LCD pin 13) | push-pull 3.3 V |
+| D9 | PA8 | 10 | LCD D7 (LCD pin 14) | push-pull 3.3 V |
+| A4 | PA5 | 18 | LCD RS (LCD pin 4) | push-pull 3.3 V; **SB2 open** |
+| A5 | PA6 | 17 | LCD E (LCD pin 6) | push-pull 3.3 V; **SB3 open**, no pull-down on U1-17 |
 | GND | GND | 3 | GND | |
 | — | — | 7 | +5 V | feeds the pull-up network only |
-| — | — | 17 | LCD E | **10k to GND** so the LCD stays idle |
 
-Leave these pins unused:
+Every header pin is now in use. These are reserved:
 
 | Pins | Why |
 |---|---|
 | D7, D8 | 24 MHz crystal (SB9/SB10 closed) |
-| A2, A7 | USB serial (VCP) |
-| A4, A5 | can be bridged to D4/D5 (SB2/SB3) |
-| D3, D5, D9, D13, A4, A5 | spare |
+| A2, A7 | USART2 (PA3/PA2): ESP8266 link / ST-Link VCP |
+
+Not connected: the front-panel buttons and the buzzer (U1-26).
+
+**LCD:** the stock HD44780-compatible 2×8 module, powered at 5 V on the FM30. It runs in 4-bit write-only mode; R/W is tied to GND on the FM30, so the LCD never drives the bus, and 3.3 V logic meets its V<sub>IH</sub>. PB0, PA5 and PA6 are not 5 V tolerant, so make sure the FM30 has no 5 V pull-ups on the LCD lines.
 
 **Pull-ups:** one 8-pin bussed 4.7k SIP network handles all seven bus lines. Its common pin goes to U1-7 (+5 V).
 
@@ -52,7 +59,7 @@ Notes:
 
 - **The bus is bit-banged in the main loop.** The RDS DSP (DMA plus a priority-1 interrupt) and the USB-serial receive (interrupt into a ring buffer) both preempt it. A bus write just stretches by a few hundred µs, which the SPI-style chips don't care about.
 - **Pull-ups are required.** All the bus pins are 5 V-tolerant. They only pull low, and the 4.7k pull-ups take them up to 5 V. 3.3 V push-pull would not meet the MCP4921/MCP42010 V<sub>IH</sub> of 3.5 V.
-- **Power and ground.** Power the Nucleo from the Pi's USB. Its GND must be tied to the FM30 GND.
+- **Power and ground.** Keep the Nucleo powered whenever the FM30 is on, because the bus pull-ups sit on the FM30's 5 V rail. Tie the Nucleo GND and the ESP8266 GND to the FM30 GND.
 
 ## Behavior
 
@@ -82,6 +89,23 @@ Board LED (LD2):
 | Fast blink | Tuning or fault |
 | Off | TX off |
 
+### Front-panel LCD (2×8)
+
+Boot shows `FM30 RDS` / `fw 0.3` for 1.5 s. After that, the pages rotate every 3 s:
+
+| Page | Line 1 | Line 2 |
+|---|---|---|
+| 1 | ` 98.1MHz` | `ON AIR L` / `TX OFF` (`L` = locked, `*` = overmod in the last 1 s) |
+| 2 | `RDS  PS:` | the PS name |
+| 3 | `PWR  88%` | `Vt 3.80V` |
+| 4 | `PLT LOCK` / `PLT ----` | `RDS  ON` / `RDS OFF` / `RDS MUT` (enabled, no pilot) |
+| 5–8 | message slots 1–4, set over serial with `LCD MSG` | |
+
+- **Overrides:** while tuning the screen shows the frequency and `TUNING..`. A fault shows `FAULT` and a short reason (`LOCK TMO`, `RAILED`, `LOCK LST`).
+- **Scrolling:** a bottom row longer than 8 characters scrolls. A page that scrolls stays up until it has finished one full pass.
+- **Empty slots:** message slots with no text are skipped in the rotation.
+- **Saved vs not saved:** LCD on/off, the pinned page and the rotation list are saved with `SAVE`. Message text isn't saved, so the host should send it again after a reboot.
+
 ## Commands (115200 8N1, one per line, replies `OK…`/`ERR…`)
 
 | Command | |
@@ -98,6 +122,10 @@ Board LED (LD2):
 | `PI C0DE`, `PTY n`, `TP/TA/MS/STEREO 0/1` | RDS flags |
 | `PS text`, `RT text` | station name (8), radiotext (64) |
 | `STATUS`, `STATUS 5` | JSON status now / every 5 s |
+| `LCD ON` / `LCD OFF` | blank or restore the LCD |
+| `LCD MSG 1 WiFi OK\|192.168.1.23` | message slot 1–4 (pages 5–8): top \| bottom, bottom up to 48 chars; no `\|` = all on the bottom row; `LCD MSG 1` alone clears it |
+| `LCD ROTATE 1 5 6`, `LCD ROTATE ALL` | pages included in the rotation |
+| `LCD PAGE 5`, `LCD PAGE 0` | pin one page (1–8); 0 = rotate |
 | `SAVE`, `DEFAULTS`, `HELP` | |
 
 Example status:
@@ -108,7 +136,7 @@ Example status:
  "ovm":0,"pilot_lock":1,"pilot_hz":19000.01,"pilot_ampl":88.0,"pilot_err":0.002,"rds":1,...}
 ```
 
-Pi side: `tools/fm30.py` (pyserial). From FPP you can call it from a script, e.g. `fm30.py rt "Now playing: $TITLE"`.
+Host side: the ESP8266 sends these commands as plain text lines, for example `LCD MSG 1 WiFi OK|192.168.1.23` once it joins the network. For bench tests from a PC, `tools/fm30.py` (pyserial) sends the same commands over the ST-Link port, e.g. `fm30.py rt "Now playing: $TITLE"`.
 
 ## Tests
 
@@ -125,4 +153,5 @@ Results: 45/45 groups decoded, and the carrier is 0.4° from 3× pilot at pilot 
 1. **Bus first, no RF.** Flash the board and wire everything. Run `TX OFF`, then `FREQ 98.1`, then `STATUS`. Vtune should read about 3.8 V, which tells you the bus and the PLL work. Compare it with a DMM on C38 and adjust `VTSCALE` if needed.
 2. **RF on.** Run `TX ON` and check that the LOCK LED comes on and you hear the carrier on a receiver.
 3. **Saleae check.** With the Saleae on the bus, the traffic should match the stock captures: U3 3-word pattern, U6, then the U7 ramp.
-4. **RDS.** Feed in audio and check that `pilot_lock` goes to 1. Use an RDS receiver or an SDR (RDS Spy, gr-rds) to adjust `RDSLEVEL`, then `RDSPHASE`. Then `SAVE`.
+4. **LCD.** At boot you should see `FM30 RDS` / `fw 0.3`, then the pages. If the display stays blank, check SB2/SB3 are open, the LCD contrast pot and the 5 V supply to the module.
+5. **RDS.** Feed in audio and check that `pilot_lock` goes to 1. Use an RDS receiver or an SDR (RDS Spy, gr-rds) to adjust `RDSLEVEL`, then `RDSPHASE`. Then `SAVE`.
