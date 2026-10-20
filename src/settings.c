@@ -49,7 +49,7 @@ void settings_defaults(void)
 {
     fm30.f10 = FREQ_DEF_X10;
     fm30.power_target = POWER_DEF;
-    fm30.tx_enable = true;
+    fm30.tx_enable = false;          /* RF stays off until a TX ON command */
     fm30.volume = VOLUME_DEF;
     fm30.balance = 0;
     fm30.u6_trim = 0;
@@ -73,7 +73,7 @@ bool settings_load(void)
         return false;
     fm30.f10 = s->f10;
     fm30.power_target = s->power > POWER_MAX ? POWER_MAX : s->power;
-    fm30.tx_enable = s->tx;
+    /* s->tx is still saved but not restored: TX always starts off. */
     fm30.volume = s->volume;
     fm30.balance = s->balance;
     fm30.u6_trim = s->u6_trim;

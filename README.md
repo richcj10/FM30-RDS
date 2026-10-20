@@ -63,7 +63,7 @@ Notes:
 
 ## Behavior
 
-1. **Boot:** U7 = 0 (RF off). U2 gets the saved volume/balance, then a full tune runs.
+1. **Boot:** U7 = 0 (RF off). U2 gets the saved volume/balance, then a full tune runs (PLL lock and U6), but **TX always starts off**: RF stays at 0 until a `TX ON` command. A saved TX state is not restored, and `DEFAULTS` also turns TX off.
 2. **Tune:**
    - Write U7 = 0.
    - Write U3 (the same 3-word pattern as the stock firmware).
