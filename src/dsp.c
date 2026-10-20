@@ -57,6 +57,7 @@ static float    sym[5];                           /* bits n-2 .. n+2 */
 static uint8_t  prev_diff;
 static int      lock_cnt;
 static volatile int busy;
+static uint32_t test_ph, test_inc;                /* DACTEST 2: 1 kHz sine */
 
 #define TWO_PI      6.283185307f
 #define RAD2PH      (4294967296.0f / TWO_PI)
@@ -131,6 +132,7 @@ STATIC void process(const uint16_t *in, uint16_t *out)
     uint32_t ofs = (uint32_t)(int32_t)((float)dsp.phase_deg * (4294967296.0f / 360.0f));
     bool on = dsp.rds_enable && (dsp.pilot_lock || dsp.free_run);
     float amp = on ? (float)dsp.level : 0.0f;
+    bool tone = dsp.dac_test == 2;
     float I = 0, Q = 0, sum = 0, d0 = dc;
 
     for (int i = 0; i < n; i++) {
@@ -148,6 +150,7 @@ STATIC void process(const uint16_t *in, uint16_t *out)
         prev57 = p57;
         float tau = ((float)cyc57 + (float)p57 * 2.3283064e-10f) * (1.0f / 48.0f);
         int v = 2048 + (int)(amp * envelope(tau) * sin_lut[p57 >> 22]);
+        if (tone) { v = 2048 + (int)(2047.0f * sin_lut[test_ph >> 22]); test_ph += test_inc; }
         if (v < 0) v = 0;
         if (v > 4095) v = 4095;
         out[i] = (uint16_t)v;
@@ -214,14 +217,49 @@ void dsp_core_init(float sample_rate)
     fs = sample_rate;
     inc_nom = (uint32_t)(19000.0 / (double)fs * 4294967296.0 + 0.5);
     nco_inc = inc_nom;
+    test_inc = (uint32_t)(1000.0 / (double)fs * 4294967296.0 + 0.5);
     if (dsp.level == 0) dsp.level = RDS_LEVEL_DEF;
 }
 
 #ifndef DSP_HOST_TEST
+static HAL_StatusTypeDef dac_config(uint32_t trigger)
+{
+    DAC_ChannelConfTypeDef c = {0};
+    c.DAC_HighFrequency = DAC_HIGH_FREQUENCY_INTERFACE_MODE_AUTOMATIC;   /* HCLK 170 MHz -> HFSEL >160 MHz */
+    c.DAC_DMADoubleDataMode = DISABLE;
+    c.DAC_SignedFormat = DISABLE;
+    c.DAC_SampleAndHold = DAC_SAMPLEANDHOLD_DISABLE;
+    c.DAC_Trigger = trigger;
+    c.DAC_Trigger2 = DAC_TRIGGER_NONE;
+    c.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+    c.DAC_ConnectOnChipPeripheral = DAC_CHIPCONNECT_EXTERNAL;
+    c.DAC_UserTrimming = DAC_TRIMMING_FACTORY;
+    return HAL_DAC_ConfigChannel(&hdac1, &c, RDS_DAC_CH);
+}
+
+/* ADC and DAC DMA both start at sample 0, then TIM6 clocks them together:
+ * process() relies on the DAC reading the half the ADC is not filling. */
+static HAL_StatusTypeDef stream_start(void)
+{
+    for (int i = 0; i < 2 * DSP_BLOCK; i++) dac_buf[i] = 2048;
+    DAC1->SR = DAC_SR_DMAUDR1;                     /* clear a latched underrun (rc_w1) */
+    __HAL_TIM_SET_COUNTER(&htim6, 0);
+    HAL_StatusTypeDef st = HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, 2 * DSP_BLOCK);
+    if (st == HAL_OK) st = HAL_DAC_Start_DMA(&hdac1, RDS_DAC_CH, (uint32_t *)dac_buf, 2 * DSP_BLOCK, DAC_ALIGN_12B_R);
+    if (st == HAL_OK) st = HAL_TIM_Base_Start(&htim6);
+    return st;
+}
+
+static void stream_stop(void)
+{
+    HAL_TIM_Base_Stop(&htim6);
+    HAL_ADC_Stop_DMA(&hadc1);
+    HAL_DAC_Stop_DMA(&hdac1, RDS_DAC_CH);          /* also clears EN1 */
+}
+
 void dsp_init(void)
 {
     dsp_core_init((float)SystemCoreClock / (DSP_TIM_ARR + 1));
-    for (int i = 0; i < 2 * DSP_BLOCK; i++) dac_buf[i] = 2048;
 
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_ADC12_CLK_ENABLE();
@@ -246,7 +284,7 @@ void dsp_init(void)
     TIM_MasterConfigTypeDef m = {0};
     m.MasterOutputTrigger = TIM_TRGO_UPDATE;
     m.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-    HAL_TIMEx_MasterConfigSynchronization(&htim6, &m);
+    if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &m) != HAL_OK) Error_Handler();
 
     /* ADC1 DMA */
     hdma_adc1.Instance = DMA1_Channel1;
@@ -286,7 +324,7 @@ void dsp_init(void)
     ch.SingleDiff = ADC_SINGLE_ENDED;
     ch.OffsetNumber = ADC_OFFSET_NONE;
     if (HAL_ADC_ConfigChannel(&hadc1, &ch) != HAL_OK) Error_Handler();
-    HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+    if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK) Error_Handler();
 
     /* DAC1 DMA */
     hdma_dac1.Instance = DMA1_Channel2;
@@ -294,7 +332,7 @@ void dsp_init(void)
     hdma_dac1.Init.Direction = DMA_MEMORY_TO_PERIPH;
     hdma_dac1.Init.PeriphInc = DMA_PINC_DISABLE;
     hdma_dac1.Init.MemInc = DMA_MINC_ENABLE;
-    hdma_dac1.Init.PeriphDataAlignment = DMA_PDATAALIGN_HALFWORD;
+    hdma_dac1.Init.PeriphDataAlignment = DMA_PDATAALIGN_WORD;   /* G4 DAC registers: 32-bit access only */
     hdma_dac1.Init.MemDataAlignment = DMA_MDATAALIGN_HALFWORD;
     hdma_dac1.Init.Mode = DMA_CIRCULAR;
     hdma_dac1.Init.Priority = DMA_PRIORITY_HIGH;
@@ -304,25 +342,37 @@ void dsp_init(void)
     /* DAC1 CH1 on PA4, triggered by TIM6 */
     hdac1.Instance = DAC1;
     if (HAL_DAC_Init(&hdac1) != HAL_OK) Error_Handler();
-    DAC_ChannelConfTypeDef dc_cfg = {0};
-    dc_cfg.DAC_HighFrequency = DAC_HIGH_FREQUENCY_INTERFACE_MODE_AUTOMATIC;
-    dc_cfg.DAC_DMADoubleDataMode = DISABLE;
-    dc_cfg.DAC_SignedFormat = DISABLE;
-    dc_cfg.DAC_SampleAndHold = DAC_SAMPLEANDHOLD_DISABLE;
-    dc_cfg.DAC_Trigger = DAC_TRIGGER_T6_TRGO;
-    dc_cfg.DAC_Trigger2 = DAC_TRIGGER_NONE;
-    dc_cfg.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
-    dc_cfg.DAC_ConnectOnChipPeripheral = DAC_CHIPCONNECT_EXTERNAL;
-    dc_cfg.DAC_UserTrimming = DAC_TRIMMING_FACTORY;
-    if (HAL_DAC_ConfigChannel(&hdac1, &dc_cfg, RDS_DAC_CH) != HAL_OK) Error_Handler();
+    if (dac_config(DAC_TRIGGER_T6_TRGO) != HAL_OK) Error_Handler();
 
     HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(DMA1_Channel1_IRQn);
     HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 2, 0);
     HAL_NVIC_EnableIRQ(DMA1_Channel2_IRQn);
 
-    if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)adc_buf, 2 * DSP_BLOCK) != HAL_OK) Error_Handler();
-    if (HAL_DAC_Start_DMA(&hdac1, RDS_DAC_CH, (uint32_t *)dac_buf, 2 * DSP_BLOCK, DAC_ALIGN_12B_R) != HAL_OK) Error_Handler();
-    HAL_TIM_Base_Start(&htim6);
+    if (stream_start() != HAL_OK) Error_Handler();
+}
+
+/* ---------------- DACTEST (bench diagnostics) ---------------- */
+uint32_t dsp_dac_error(void) { return hdac1.ErrorCode; }
+
+int dsp_dac_test(int mode)
+{
+    if (mode < 0 || mode > 2) return -1;
+    HAL_StatusTypeDef st;
+    if (mode == 1) {
+        /* TIM6/ADC keep running (pilot PLL stays up); only the DAC leaves the stream */
+        dsp.dac_test = 1;
+        HAL_DAC_Stop_DMA(&hdac1, RDS_DAC_CH);
+        st = dac_config(DAC_TRIGGER_SOFTWARE);
+        if (st == HAL_OK) st = HAL_DAC_SetValue(&hdac1, RDS_DAC_CH, DAC_ALIGN_12B_R, 2048);
+        if (st == HAL_OK) st = HAL_DAC_Start(&hdac1, RDS_DAC_CH);   /* sets SWTRIG1 */
+        return st;
+    }
+    /* 0 and 2: full restart of the stream (re-syncs the DAC to the ADC halves) */
+    stream_stop();
+    dsp.dac_test = (uint8_t)mode;
+    st = dac_config(DAC_TRIGGER_T6_TRGO);
+    if (st == HAL_OK) st = stream_start();
+    return st;
 }
 #endif /* !DSP_HOST_TEST */

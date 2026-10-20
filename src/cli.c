@@ -165,6 +165,8 @@ static void help(void)
         "U6TRIM <n>  U6 <code>|AUTO   deviation compensation trim/override",
         "VTSCALE <x>           Vtune = Vadc * x (default 3.0)",
         "RDS ON|OFF  RDSFREE ON|OFF  RDSLEVEL <0-2047>  RDSPHASE <deg>",
+        "DACDBG                DAC/DMA register dump (read-only)",
+        "DACTEST 0|1|2         RDS DAC: 0 normal, 1 DC 2048 (DMA off), 2 1 kHz full-scale sine",
         "PI <hex>  PTY <0-31>  TP|TA|MS|STEREO <0|1>",
         "PS <text>  RT <text>  (RT with no text clears it)",
         "STATUS [period_s]     JSON status; period 0 = off",
@@ -246,6 +248,48 @@ static void exec(char *line)
         long v = strtol(rest, NULL, 0);
         if (v < -180 || v > 180) { printfln("ERR -180..180"); return; }
         dsp.phase_deg = (int16_t)v; printfln("OK RDSPHASE %ld", v);
+    } else if (!strcmp(cmd, "DACDBG")) {
+        /* read-only snapshot; DMA1_Channel2 (DAC) is muxed by DMAMUX1_Channel1 (channel n -> mux n-1) */
+        uint32_t cr = DAC1->CR, sr = DAC1->SR, mcr = DAC1->MCR;
+        uint32_t ccr = DMA1_Channel2->CCR, mux = DMAMUX1_Channel1->CCR;
+        uint32_t moder = (GPIOA->MODER >> (4 * 2)) & 3u;
+        printfln("DAC1 CR=%08lX SR=%08lX DOR1=%03lX DHR12R1=%03lX MCR=%08lX",
+                 (unsigned long)cr, (unsigned long)sr, (unsigned long)DAC1->DOR1,
+                 (unsigned long)DAC1->DHR12R1, (unsigned long)mcr);
+        printfln("  CR: EN1=%lu TEN1=%lu TSEL1=%lu (7=TIM6) DMAEN1=%lu DMAUDRIE1=%lu CEN1=%lu",
+                 (unsigned long)(cr & DAC_CR_EN1) >> DAC_CR_EN1_Pos,
+                 (unsigned long)(cr & DAC_CR_TEN1) >> DAC_CR_TEN1_Pos,
+                 (unsigned long)(cr & DAC_CR_TSEL1) >> DAC_CR_TSEL1_Pos,
+                 (unsigned long)(cr & DAC_CR_DMAEN1) >> DAC_CR_DMAEN1_Pos,
+                 (unsigned long)(cr & DAC_CR_DMAUDRIE1) >> DAC_CR_DMAUDRIE1_Pos,
+                 (unsigned long)(cr & DAC_CR_CEN1) >> DAC_CR_CEN1_Pos);
+        printfln("  SR: DAC1RDY=%lu DORSTAT1=%lu DMAUDR1=%lu  MCR: MODE1=%lu HFSEL=%lu (2=>160MHz)",
+                 (unsigned long)(sr & DAC_SR_DAC1RDY) >> DAC_SR_DAC1RDY_Pos,
+                 (unsigned long)(sr & DAC_SR_DORSTAT1) >> DAC_SR_DORSTAT1_Pos,
+                 (unsigned long)(sr & DAC_SR_DMAUDR1) >> DAC_SR_DMAUDR1_Pos,
+                 (unsigned long)(mcr & DAC_MCR_MODE1) >> DAC_MCR_MODE1_Pos,
+                 (unsigned long)(mcr & DAC_MCR_HFSEL) >> DAC_MCR_HFSEL_Pos);
+        printfln("DMA1_Ch2 CCR=%08lX (EN=%lu CIRC=%lu) CNDTR=%lu  DMAMUX1_Ch1 CCR=%08lX (REQ_ID=%lu, want %u)",
+                 (unsigned long)ccr, (unsigned long)(ccr & DMA_CCR_EN), (unsigned long)(ccr & DMA_CCR_CIRC) >> DMA_CCR_CIRC_Pos,
+                 (unsigned long)DMA1_Channel2->CNDTR, (unsigned long)mux,
+                 (unsigned long)(mux & DMAMUX_CxCR_DMAREQ_ID), (unsigned)DMA_REQUEST_DAC1_CHANNEL1);
+        printfln("PA4 MODER=%lu (3=analog)  AHB1ENR=%08lX (DMA1EN=%lu DMAMUX1EN=%lu)  AHB2ENR=%08lX (DAC1EN=%lu)",
+                 (unsigned long)moder, (unsigned long)RCC->AHB1ENR,
+                 (unsigned long)(RCC->AHB1ENR & RCC_AHB1ENR_DMA1EN) >> RCC_AHB1ENR_DMA1EN_Pos,
+                 (unsigned long)(RCC->AHB1ENR & RCC_AHB1ENR_DMAMUX1EN) >> RCC_AHB1ENR_DMAMUX1EN_Pos,
+                 (unsigned long)RCC->AHB2ENR,
+                 (unsigned long)(RCC->AHB2ENR & RCC_AHB2ENR_DAC1EN) >> RCC_AHB2ENR_DAC1EN_Pos);
+        printfln("dsp load=%u%% overruns=%lu dac_test=%u hal_err=%08lX",
+                 dsp.load_pct, (unsigned long)dsp.overruns, dsp.dac_test, (unsigned long)dsp_dac_error());
+        printfln("OK");
+    } else if (!strcmp(cmd, "DACTEST")) {
+        char *end;
+        long v = strtol(rest, &end, 0);
+        if (end == rest) { printfln("ERR DACTEST 0|1|2"); return; }
+        int st = dsp_dac_test((int)v);
+        if (st < 0) printfln("ERR DACTEST 0|1|2");
+        else if (st) printfln("ERR HAL %d err=%08lX", st, (unsigned long)dsp_dac_error());
+        else printfln("OK DACTEST %ld", v);
     } else if (!strcmp(cmd, "PI")) {
         char *end;
         unsigned long v = strtoul(rest, &end, 16);
